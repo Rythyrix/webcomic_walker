@@ -54,7 +54,7 @@ if [ "$(echo $@ | grep -iE -e '--help|-h|/\?')" ];
 fi
 
 
-ACCEPTED_ARGUMENTS=$(cat_accepted_args | sed -rn ':a;n;$!ba;:b;s@[ \t]*:[^\n]+\n@\n@;tb;s@\n@,@gp')
+ACCEPTED_ARGUMENTS=$(cat_accepted_args | sed -rn ':a;N;$!ba;:b;s@[ \t]*:[^\n]+\n?@\n@;tb;s@\n@,@g;s@(.*),$@\1@p')
 
 while [ "${1+defined}" ]; 
 	do
