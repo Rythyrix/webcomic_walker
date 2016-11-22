@@ -23,6 +23,7 @@ USER_AGENT : Optional. User agent to feed cURL to get around unauthorized client
 SLEEPTIME_IMAGE : Time in seconds to wait until next execution of image scraping. Useful for not overloading a given server.
 SLEEPTIME_PAGE : As SLEEPTIME_IMAGE, except for scraping the next webpage.
 CURL_RATELIMIT : Optional. Limit cURL's transfer rate per instance. Useful if one needs to use their internet connection for other activities whilst scraping.
+MD5CHECK : Optional. If downloaded image matches the hashes of previously-downloaded images, then discard the current image and go on to the next one.
 _EOF_
 }
 
@@ -45,7 +46,7 @@ done
 argparse()
 {
 
-if [ "$(echo $@ | grep -iE -e '--help|-h|/\?')" ];
+if [ "$(echo $@ | grep -iE -e ' --help | -h | /\? ')" ];
 	then
 		echo Accepted arguments:
 		cat_accepted_args | sed 's@.*@&\n@'
@@ -107,7 +108,7 @@ for OUTPUT in $(echo ${ACCEPTED_ARGUMENTS} | sed 's@,@ @g');
 				LOCAL_PREFIX=${LOCAL_PREFIX:-comic_}
 				;;
 			#REQUIRED
-			REMOTE_PREFIX*|REGEX_IMAGE_LINK|REGEX_IMAGE_SEARCH|REGEX_NEXT_LINK|REGEX_NEXT_SEARCH|WEBPAGE)
+			REMOTE_PREFIX_IMAGE|REMOTE_PREFIX_PAGE|REGEX_IMAGE_LINK|REGEX_IMAGE_SEARCH|REGEX_NEXT_LINK|REGEX_NEXT_SEARCH|WEBPAGE)
 
 				if  [ "${!OUTPUT}" = "NULL" ] ; 
 					then
@@ -139,11 +140,9 @@ fi
 
 init_vars()
 {
-#initial scrape page
 EXITSCRIPT=0
 #init after dirsetup
 
-# IMAGECOUNT : Affects output filename.
 IMAGECOUNT=${COUNT:-$(ls "${_OUTDIR}" | sed -rn "$ {s@${LOCAL_PREFIX}0+([0-9]+)\..*@\1@;teof;s@.*@0@;:eof;p}")}
 
 SLEEPTIME_PAGE=${SLEEPTIME_PAGE:-1}
@@ -155,20 +154,13 @@ CURL_ARGS="-A ${USER_AGENT:-\'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:52.0)
 
 }
 
-#sed_REGEX_* fed to sed via -f <(funcname)
+#sed_REGEX* fed to sed via -f <(funcname)
 #heredocs and process substitution are useful things
 
-sed_REGEX_IMAGE()
+sed_REGEX()
 {
 cat << _EOF_
-\@$(cat "${_TMPDIR}/REGEX_IMAGE_SEARCH.cat")@{$(cat "${_TMPDIR}/REGEX_IMAGE_LINK.cat")}
-_EOF_
-}
-
-sed_REGEX_NEXT()
-{
-cat << _EOF_
-\@$(cat "${_TMPDIR}/REGEX_NEXT_SEARCH.cat")@{$(cat "${_TMPDIR}/REGEX_NEXT_LINK.cat")}
+\@$(cat "${_TMPDIR}/REGEX_${1^^}_SEARCH.cat")@{$(cat "${_TMPDIR}/REGEX_${1^^}_LINK.cat")}
 _EOF_
 }
 
@@ -176,15 +168,38 @@ _EOF_
 save_images()
 {
 echo function save_images
-for IMAGELINK in $(sed -rn -f <(sed_REGEX_IMAGE) "${1}");
+for IMAGELINK in $(sed -rn -f <(sed_REGEX IMAGE) "${1}");
 	do
 		IMAGECOUNT=$((${IMAGECOUNT:-0}+1))
 		IMAGENAME=$(echo ${IMAGECOUNT} | sed -rn "s@.*@000000000000000000000000000000&@;s@0*(0[0-9]{${DIGITS},})\$@\1@p")
-		IMAGEEXT=$(echo ${IMAGELINK} | sed 's@.*\.@@')
+#IMAGEEXT being defined without prevention of extra characters is a bad thing. if you can't find an extension from the link, then don't bother with it
+# also eliminate trailing slashs, including any pathnames afterwards.
+# note to dev: needs a better regex.
+		IMAGEEXT=$(echo ${IMAGELINK} | sed -n 's@.*\.@@p')
 
 		echo debug save_images imagelink is "${IMAGELINK}"
 
-		curl "${CURL_ARGS}" "${REMOTE_PREFIX_IMAGE}${IMAGELINK}" > "${_OUTDIR}/${LOCAL_PREFIX}${IMAGENAME}.${IMAGEEXT}" 2>/dev/null
+		if [ "${MD5CHECK:-false}" = "TRUE" ] ;
+			then
+
+				curl "${CURL_ARGS}" "${REMOTE_PREFIX_IMAGE}${IMAGELINK}"  2>/dev/null | tee "${_OUTDIR}/${LOCAL_PREFIX}${IMAGENAME}.${IMAGEEXT:-needsparsing}" | md5sum - | sed 's@\([0-9a-f]\+\).*@\1@' | tee "${_TMPDIR}/thismd5.cat" | [ "$(grep -v -f <(echo ${MD5STORAGE[@]:-NOSUMS} | tr ' ' '\n'))HAVEFILE" == "HAVEFILE" ]
+
+#if we have the file, as determined by the md5sum of the curled image, then delete the new iteration thereof, otherwise add md5 to array for next iteration
+#teeing the sedded md5 to a file to cat later saves computation time
+
+			if [ "$?" = "0" ];
+				then
+					rm -f "${_OUTDIR}/${LOCAL_PREFIX}${IMAGENAME}.${IMAGEEXT:-needsparsing}"
+					IMAGECOUNT=$((${IMAGECOUNT}-1))
+				else
+					MD5COUNT=$((${#MD5STORAGE[@]:-1}+1))
+					MD5STORAGE[${MD5COUNT}]=$(cat "${_TMPDIR}/thismd5.cat")
+			fi
+		else
+			curl "${CURL_ARGS}" "${REMOTE_PREFIX_IMAGE}${IMAGELINK}" > "${_OUTDIR}/${LOCAL_PREFIX}${IMAGENAME}.${IMAGEEXT##/*:-needsparsing}" 2>/dev/null
+		fi
+		
+		echo debug md5storage has "${#MD5STORAGE[@]}" items, latest is number "${MD5COUNT}" \""$(echo ${MD5STORAGE[@]} | sed 's@.* @@')"\"
 
 		sleep ${SLEEPTIME_IMAGE}
 done
@@ -214,16 +229,16 @@ WEBPAGEERROR=${WEBPAGE}
 	fi
 
 
-echo debug WEBPAGE=$(sed -rn -f <(sed_REGEX_NEXT) "${_TMPDIR}/webpage.html" | uniq)
+echo debug WEBPAGE=$(sed -rn -f <(sed_REGEX NEXT) "${_TMPDIR}/webpage.html" | uniq)
 
-WEBPAGE=$(sed -rn -f <(sed_REGEX_NEXT) "${_TMPDIR}/webpage.html" | uniq)
+WEBPAGE=$(sed -rn -f <(sed_REGEX NEXT) "${_TMPDIR}/webpage.html" | uniq)
 
 if [ "${WEBPAGE}ERROR" = "ERROR" ];
 	then
 		echo cannot find next page, breaking!
 		echo was on "${WEBPAGEERROR}"
 		echo "${WEBPAGEERROR}" > "${_TMPDIR}/continue_webpage.txt"
-		exit 50
+		break
 fi
 
 curl_page "${REMOTE_PREFIX_PAGE}${WEBPAGE}"
@@ -232,6 +247,14 @@ sleep ${SLEEPTIME_PAGE}
 
 }
 
+# exit_script handles the saving of configuration files, including the md5sum array if enabled, but also the current COUNT, WEBPAGE, etc.
+exit_script()
+{
+echo function exit_script
+#go save all the MD5s we currently have, only
+echo "${MD5STORAGE[@]}" | tr ' ' '\n' > "${_TMPDIR}/md5storage.per"
+echo Scraped "$(ls ${_OUTDIR} | wc -l)" images.
+}
 #begin scraping
 
 argparse "$@"
@@ -249,10 +272,17 @@ curl ${CURL_ARGS} "${WEBPAGE}" > "${_TMPDIR}/webpage.html" 2>/dev/null
 #get the first page
 save_images "${_TMPDIR}/webpage.html"
 
-while ! [ "${EXITSCRIPT}" -ge 1 ];
+while [ "${EXITSCRIPT:-0}" == "0" ];
 	do	
 		__main_loop__
 done
+
+
+
 #begin script footer
-echo Scraped "$(ls out | wc -l)" images.
+echo call exit_script to finish up.
+exit_script
+
+
+
 exit

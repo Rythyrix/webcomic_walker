@@ -23,6 +23,7 @@ while [ ${watchdog_stop:=1} = 1 ];
 				then
 					watchdog_stop=0
 			fi
+	ls out | tail -n 10; echo END OF DIR; echo .;
 	 sleep 2
 done
 
